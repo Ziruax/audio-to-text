@@ -10,18 +10,17 @@ st.title("🎙️ Audio to Transcription with Timestamps")
 st.caption("Powered by OpenAI Whisper Tiny via 🤗 Transformers")
 
 # ------------------------------------------------------------------
-# 1. Pipeline Loading (Cached & Explicit Processor)
+# 1. Pipeline Loading (Cached)
 # ------------------------------------------------------------------
 @st.cache_resource
 def load_asr_pipeline():
-    """Loads Whisper pipeline with explicit processor to bypass auto-detection errors."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if device == "cuda" else torch.float32
-    
+
     return pipeline(
         "automatic-speech-recognition",
         model="openai/whisper-tiny",
-        processor="openai/whisper-tiny",  # 🔑 FIX: Explicitly pass processor
+        processor="openai/whisper-tiny",  # Explicit processor prevents v5+ auto-guess errors
         torch_dtype=torch_dtype,
         device=device
     )
@@ -31,7 +30,6 @@ with st.spinner("⏳ Loading Whisper Tiny model (first run takes ~15s)..."):
         asr_pipe = load_asr_pipeline()
     except Exception as e:
         st.error("❌ Model initialization failed")
-        st.code(f"Python: {__import__('sys').version}\nTransformers: {__import__('transformers').__version__}")
         st.error(f"Details: {e}")
         st.stop()
 
@@ -58,14 +56,14 @@ if uploaded_file is not None:
     st.audio(uploaded_file, format="audio/wav")
 
     if st.button("🚀 Transcribe with Timestamps", type="primary"):
-        # Save to temp file for pipeline compatibility
+        # Write to temp file so pipeline can read it with ffmpeg
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             tmp.write(uploaded_file.getbuffer())
             tmp_path = tmp.name
 
         try:
             with st.spinner("🔊 Processing audio..."):
-                # return_timestamps=True forces chunk-level output
+                # return_timestamps=True enables chunk-level timestamps
                 result = asr_pipe(tmp_path, return_timestamps=True)
 
             st.success("✅ Transcription Complete!")
@@ -77,12 +75,13 @@ if uploaded_file is not None:
                 st.subheader("⏱️ Timestamped Segments")
                 chunks = []
                 for chunk in result["chunks"]:
-                    start, end = chunk.get("timestamp", (None, None))
-                    chunks.append({
-                        "Start": format_seconds(start),
-                        "End": format_seconds(end),
-                        "Text": chunk["text"].strip()
-                    })
+                    ts = chunk.get("timestamp", (None, None))
+                    if ts[0] is not None:
+                        chunks.append({
+                            "Start": format_seconds(ts[0]),
+                            "End": format_seconds(ts[1]),
+                            "Text": chunk["text"].strip()
+                        })
                 st.dataframe(pd.DataFrame(chunks), use_container_width=True, hide_index=True)
             else:
                 st.info("⚠️ No timestamp chunks returned. This may happen with very short or silent audio.")
