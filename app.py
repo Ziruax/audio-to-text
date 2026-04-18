@@ -121,7 +121,7 @@ if uploaded_file:
             finally:
                 os.unlink(tmp_path)
 
-st.sidebar.markdown("""
+st.sidebar.markdown(""
 ### How to use
 1. Upload an audio file (MP3, WAV, M4A, etc.)
 2. Click **Transcribe with Timestamps**
