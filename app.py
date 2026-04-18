@@ -1,95 +1,68 @@
 import streamlit as st
-import torch
-import numpy as np
+import whisper
+import tempfile
+import os
 import pandas as pd
-import soundfile as sf
-import io
-from transformers import pipeline
 
-st.set_page_config(page_title="Whisper Tiny Transcriber", layout="wide")
-st.title("🎙️ Audio to Transcription with Timestamps")
-st.caption("Powered by OpenAI Whisper Tiny via 🤗 Transformers")
+st.set_page_config(page_title="Whisper Tiny Transcriber", page_icon="🎙️", layout="wide")
+st.title("🎙️ Whisper Tiny Audio Transcriber")
+st.markdown("Upload an audio file to generate a transcription with precise timestamps.")
 
-# ------------------------------------------------------------------
-# 1. Pipeline Loading (Cached)
-# ------------------------------------------------------------------
+# 1. Load Model (Cached)
 @st.cache_resource
-def load_asr_pipeline():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch_dtype = torch.float16 if device == "cuda" else torch.float32
+def load_model():
+    return whisper.load_model("tiny")
 
-    return pipeline(
-        "automatic-speech-recognition",
-        model="openai/whisper-tiny",
-        processor="openai/whisper-tiny",
-        torch_dtype=torch_dtype,
-        device=device
-    )
+with st.spinner("📦 Loading Whisper Tiny model (first run only)..."):
+    model = load_model()
 
-with st.spinner("⏳ Loading Whisper Tiny model (first run takes ~15s)..."):
-    try:
-        asr_pipe = load_asr_pipeline()
-    except Exception as e:
-        st.error("❌ Model initialization failed")
-        st.error(f"Details: {e}")
-        st.stop()
+# 2. File Uploader
+audio_file = st.file_uploader("Upload Audio", type=["wav", "mp3", "m4a", "ogg", "flac"])
 
-# ------------------------------------------------------------------
-# 2. Helper Functions
-# ------------------------------------------------------------------
-def format_seconds(sec: float) -> str:
-    if sec is None:
-        return "--:--:--"
-    m, s = divmod(sec, 60)
-    h, m = divmod(m, 60)
-    return f"{int(h):02d}:{int(m):02d}:{s:05.2f}"
+if audio_file is not None:
+    st.audio(audio_file)
+    
+    if st.button("🚀 Generate Transcription", type="primary"):
+        with st.spinner("🔊 Transcribing audio..."):
+            # Save to temp file safely
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                tmp.write(audio_file.getbuffer())
+                tmp_path = tmp.name
 
-# ------------------------------------------------------------------
-# 3. Streamlit UI
-# ------------------------------------------------------------------
-uploaded_file = st.file_uploader(
-    "📂 Upload an audio file",
-    type=["mp3", "wav", "m4a", "ogg", "flac"],
-    help="Supported formats: MP3, WAV, M4A, OGG, FLAC"
-)
-
-if uploaded_file is not None:
-    st.audio(uploaded_file, format="audio/wav")
-
-    if st.button("🚀 Transcribe with Timestamps", type="primary"):
-        try:
-            with st.spinner("🔊 Processing audio..."):
-                # 🔑 BYPASS FFMPEG: Load audio directly into memory as a NumPy array
-                audio_bytes = uploaded_file.read()
-                audio_data, sampling_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+            try:
+                # verbose=False keeps Streamlit logs clean
+                result = model.transcribe(tmp_path, verbose=False)
+                st.success("✅ Transcription Complete!")
                 
-                # Whisper expects 1-channel audio. Convert stereo to mono if needed
-                if audio_data.ndim > 1:
-                    audio_data = audio_data.mean(axis=1)
+                st.subheader("📝 Timestamped Segments")
+                segments = []
+                for seg in result["segments"]:
+                    start = seg["start"]
+                    end = seg["end"]
+                    
+                    # Format with sub-second precision: HH:MM:SS.mmm
+                    start_str = f"{int(start//3600):02d}:{int((start%3600)//60):02d}:{start%60:05.2f}"
+                    end_str = f"{int(end//3600):02d}:{int((end%3600)//60):02d}:{end%60:05.2f}"
+                    
+                    segments.append({
+                        "Start": start_str,
+                        "End": end_str,
+                        "Text": seg["text"].strip()
+                    })
+                    
+                st.dataframe(pd.DataFrame(segments), use_container_width=True, hide_index=True)
                 
-                # Pass (array, sampling_rate) directly to pipeline
-                result = asr_pipe(audio_data, sampling_rate=sampling_rate, return_timestamps=True)
-
-            st.success("✅ Transcription Complete!")
-
-            st.subheader("📝 Full Transcript")
-            st.text_area("", result["text"], height=120, label_visibility="collapsed")
-
-            if result.get("chunks"):
-                st.subheader("⏱️ Timestamped Segments")
-                chunks = []
-                for chunk in result["chunks"]:
-                    ts = chunk.get("timestamp", (None, None))
-                    if ts[0] is not None:
-                        chunks.append({
-                            "Start": format_seconds(ts[0]),
-                            "End": format_seconds(ts[1]),
-                            "Text": chunk["text"].strip()
-                        })
-                st.dataframe(pd.DataFrame(chunks), use_container_width=True, hide_index=True)
-            else:
-                st.info("⚠️ No timestamp chunks returned. This may happen with very short or silent audio.")
-
-        except Exception as e:
-            st.error(f"❌ Transcription failed: {str(e)}")
-            st.exception(e)
+                # Download full text
+                st.download_button(
+                    "⬇️ Download Full Transcript (.txt)",
+                    result["text"],
+                    file_name="transcription.txt",
+                    mime="text/plain"
+                )
+                
+            except Exception as e:
+                st.error(f"❌ Transcription failed: {e}")
+            finally:
+                # Always clean up temp file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
