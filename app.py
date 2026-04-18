@@ -11,7 +11,17 @@ st.title("🎙️ Audio to Text")
 st.caption("Upload an audio file to automatically generate a timestamped transcript.")
 
 # ------------------------------------------------------------------
-# 1. Load Model (Cached)
+# 1. Initialize Session State (REQUIRED - prevents KeyError)
+# ------------------------------------------------------------------
+if "result" not in st.session_state:
+    st.session_state.result = None
+if "done" not in st.session_state:
+    st.session_state.done = False
+if "current_file" not in st.session_state:
+    st.session_state.current_file = None
+
+# ------------------------------------------------------------------
+# 2. Load Model (Cached)
 # ------------------------------------------------------------------
 @st.cache_resource
 def load_model():
@@ -21,7 +31,7 @@ with st.spinner("Loading model..."):
     model = load_model()
 
 # ------------------------------------------------------------------
-# 2. Helpers
+# 3. Helpers
 # ------------------------------------------------------------------
 def fmt_time(sec: float) -> str:
     m, s = divmod(sec, 60)
@@ -34,19 +44,20 @@ def fmt_srt(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 # ------------------------------------------------------------------
-# 3. File Upload & Auto-Transcribe
+# 4. File Upload & Auto-Transcribe
 # ------------------------------------------------------------------
 uploaded_file = st.file_uploader("Choose audio file", type=["mp3", "wav", "m4a", "ogg", "flac"])
 
 if uploaded_file is not None:
     # Detect new file to trigger transcription automatically
-    if st.session_state.get("current_file") != uploaded_file.name:
+    if st.session_state.current_file != uploaded_file.name:
         st.session_state.current_file = uploaded_file.name
         st.session_state.result = None
         st.session_state.done = False
 
     # Run transcription automatically on new upload
-    if st.session_state.result is None and not st.session_state.get("done"):
+    # ✅ FIX: Use .get() to safely check session state keys
+    if st.session_state.get("result") is None and not st.session_state.get("done"):
         st.session_state.done = True
         tmp_path = None
         try:
@@ -70,9 +81,9 @@ if uploaded_file is not None:
                 os.unlink(tmp_path)
 
     # ------------------------------------------------------------------
-    # 4. Display Results
+    # 5. Display Results
     # ------------------------------------------------------------------
-    if st.session_state.result:
+    if st.session_state.get("result"):
         res = st.session_state.result
         st.success("✅ Transcription finished.")
 
