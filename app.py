@@ -6,167 +6,111 @@ import pandas as pd
 import time
 
 # ------------------------------------------------------------------
-# 1. Page Configuration & Custom CSS
+# 1. Page Config & High-Contrast Styling
 # ------------------------------------------------------------------
-st.set_page_config(
-    page_title="Whisper Tiny Transcriber",
-    page_icon="🎙️",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="Audio Transcriber", layout="centered", page_icon="🎙️")
 
 st.markdown("""
 <style>
-    .main-header { font-size: 2.2rem; font-weight: 700; margin-bottom: 0.25rem; }
-    .sub-header { font-size: 1rem; color: #64748b; margin-bottom: 1.5rem; }
-    .status-badge { 
-        display: inline-block; padding: 0.3rem 0.6rem; border-radius: 20px; 
-        font-size: 0.85rem; font-weight: 500; background: #dcfce7; color: #166534; 
-    }
-    .info-card { 
-        padding: 1rem; background: #f8fafc; border-radius: 10px; 
-        border: 1px solid #e2e8f0; margin-top: 0.5rem; 
-    }
-    .stDataFrame th { background-color: #0f172a !important; color: white !important; }
-    .stDataFrame tr:hover td { background-color: #f1f5f9 !important; }
+    .main-header { font-size: 1.8rem; font-weight: 700; color: #0F172A; margin-bottom: 0.25rem; }
+    .sub-text { color: #334155; font-size: 1rem; margin-bottom: 1rem; }
+    .stDataFrame th { background-color: #0F172A !important; color: #FFFFFF !important; font-weight: 600; }
+    .stDataFrame td { color: #1E293B !important; font-size: 0.95rem; }
+    .stSuccess, .stError { font-weight: 500; }
+    .export-btn { margin-top: 0.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ------------------------------------------------------------------
-# 2. Header & Model Initialization
-# ------------------------------------------------------------------
-st.markdown('<div class="main-header">🎙️ Whisper Audio Transcriber</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Fast AI transcription with precise timestamps. Runs locally using OpenAI\'s Tiny model.</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🎙️ Audio to Text</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-text">Upload an audio file to automatically generate a transcript with timestamps.</div>', unsafe_allow_html=True)
 
+# ------------------------------------------------------------------
+# 2. Model Loading (Cached)
+# ------------------------------------------------------------------
 @st.cache_resource
 def load_model():
     return whisper.load_model("tiny")
 
-with st.spinner("📦 Loading model weights..."):
+with st.spinner("⏳ Loading model (first run only)..."):
     model = load_model()
 
-st.markdown('<span class="status-badge">✅ Model Ready</span>', unsafe_allow_html=True)
+# ------------------------------------------------------------------
+# 3. Helper Functions
+# ------------------------------------------------------------------
+def format_time(sec: float) -> str:
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    return f"{int(h):02d}:{int(m):02d}:{s:05.2f}"
+
+def generate_srt(segments: list) -> str:
+    srt_lines = []
+    for i, seg in enumerate(segments, 1):
+        def fmt(sec):
+            ms = int((sec % 1) * 1000)
+            h, m, s = int(sec // 3600), int((sec % 3600) // 60), int(sec % 60)
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+        srt_lines.append(f"{i}\n{fmt(seg['start'])} --> {fmt(seg['end'])}\n{seg['text'].strip()}\n")
+    return "\n".join(srt_lines)
 
 # ------------------------------------------------------------------
-# 3. Layout: Upload & Settings
+# 4. Auto-Transcribe Logic
 # ------------------------------------------------------------------
-col_upload, col_settings = st.columns([2, 1])
+uploaded_file = st.file_uploader("📂 Choose an audio file", type=["mp3", "wav", "m4a", "ogg", "flac"])
 
-with col_upload:
-    st.subheader("📁 Upload Audio")
-    audio_file = st.file_uploader(
-        "Drag & drop or click to browse",
-        type=["wav", "mp3", "m4a", "ogg", "flac"],
-        label_visibility="collapsed",
-        help="Supported: WAV, MP3, M4A, OGG, FLAC"
-    )
+if uploaded_file is not None:
+    # Track current file to prevent duplicate processing
+    if st.session_state.get("current_file") != uploaded_file.name:
+        st.session_state.current_file = uploaded_file.name
+        st.session_state.transcript = None
+        st.session_state.processing = False
 
-with col_settings:
-    st.subheader("⚙️ Settings")
-    language = st.selectbox(
-        "Language",
-        options=["Auto-detect", "en", "es", "fr", "de", "zh", "ja", "pt", "ru"],
-        index=0,
-        help="Leave as Auto-detect for best results"
-    )
-    task = st.radio("Task", ["transcribe", "translate to English"], horizontal=True)
-    
-    if audio_file:
-        audio_bytes = audio_file.getvalue()
-        size_mb = len(audio_bytes) / (1024 * 1024)
-        st.markdown(f"""
-        <div class="info-card">
-            📄 <b>Format:</b> {audio_file.type.split('/')[-1].upper()}<br>
-            💾 <b>Size:</b> {size_mb:.2f} MB<br>
-            🔊 <b>Audio Player:</b>
-        </div>
-        """, unsafe_allow_html=True)
-        st.audio(audio_bytes)
-    else:
-        st.info("📤 Upload an audio file to begin.")
-
-# ------------------------------------------------------------------
-# 4. Transcription & Results
-# ------------------------------------------------------------------
-if audio_file is not None:
-    st.divider()
-    
-    if st.button("🚀 Generate Transcription", type="primary", use_container_width=True):
-        with st.status("Processing audio...", expanded=True) as status:
-            try:
-                status.write("📂 Preparing audio file...")
+    # Automatically run transcription when a new file is uploaded
+    if st.session_state.transcript is None and not st.session_state.get("processing"):
+        st.session_state.processing = True
+        tmp_path = None
+        try:
+            with st.status("🔊 Transcribing audio...", expanded=True) as status:
+                status.write("💾 Preparing file...")
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-                    tmp.write(audio_bytes)
+                    tmp.write(uploaded_file.getbuffer())
                     tmp_path = tmp.name
 
                 status.write("🤖 Running Whisper inference...")
-                lang_arg = None if language == "Auto-detect" else language
-                task_arg = "translate" if "translate" in task else "transcribe"
+                result = model.transcribe(tmp_path, verbose=False)
                 
-                result = model.transcribe(
-                    tmp_path, 
-                    language=lang_arg, 
-                    task=task_arg, 
-                    verbose=False
-                )
-
-                status.write("✨ Formatting output...")
-                time.sleep(0.3)
                 status.update(label="✅ Transcription Complete!", state="complete")
-
-                # Store in session state to persist across reruns
+                time.sleep(0.4)  # Let UI update smoothly
                 st.session_state.transcript = result
-                st.session_state.transcribed = True
+        except Exception as e:
+            st.error(f"❌ Transcription failed: {str(e)}")
+            st.session_state.processing = False
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
-            except Exception as e:
-                st.error(f"❌ Transcription failed: {str(e)}")
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-
-    # Display results if transcription succeeded
-    if st.session_state.get("transcribed"):
+    # ------------------------------------------------------------------
+    # 5. Display Results
+    # ------------------------------------------------------------------
+    if st.session_state.transcript:
         result = st.session_state.transcript
-        st.subheader("📝 Transcription Results")
-        
-        tab_table, tab_text, tab_export = st.tabs(["📊 Timestamp Table", "📄 Plain Text", "💾 Export Files"])
+        st.success("✅ Transcription finished")
 
-        with tab_table:
-            segments = []
-            for seg in result["segments"]:
-                s, e = seg["start"], seg["end"]
-                segments.append({
-                    "Start": f"{int(s//3600):02d}:{int((s%3600)//60):02d}:{s%60:05.2f}",
-                    "End": f"{int(e//3600):02d}:{int((e%3600)//60):02d}:{e%60:05.2f}",
-                    "Text": seg["text"].strip()
-                })
-            st.dataframe(pd.DataFrame(segments), use_container_width=True, hide_index=True, height=350)
+        st.subheader("🕒 Timestamped Segments")
+        segments_df = pd.DataFrame([
+            {"Start": format_time(s["start"]), "End": format_time(s["end"]), "Text": s["text"].strip()}
+            for s in result["segments"]
+        ])
+        st.dataframe(segments_df, use_container_width=True, hide_index=True, height=300)
 
-        with tab_text:
-            st.text_area("Full Transcript", result["text"], height=300, key="full_text_area")
+        st.subheader("📄 Full Transcript")
+        st.text_area("", result["text"], height=150, label_visibility="collapsed")
 
-        with tab_export:
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
-                st.download_button(
-                    label="⬇️ Download .TXT",
-                    data=result["text"],
-                    file_name="transcript.txt",
-                    mime="text/plain"
-                )
-            with col_dl2:
-                # Generate proper SRT content
-                srt_lines = []
-                for i, seg in enumerate(result["segments"], 1):
-                    def fmt_srt(sec):
-                        ms = int((sec % 1) * 1000)
-                        h, m, s = int(sec // 3600), int((sec % 3600) // 60), int(sec % 60)
-                        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-                    srt_lines.append(f"{i}\n{fmt_srt(seg['start'])} --> {fmt_srt(seg['end'])}\n{seg['text'].strip()}\n")
-                
-                st.download_button(
-                    label="⬇️ Download .SRT (Subtitles)",
-                    data="\n".join(srt_lines),
-                    file_name="transcript.srt",
-                    mime="text/plain"
-                )
+        st.subheader("💾 Export")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button("⬇️ Download TXT", result["text"], "transcript.txt", "text/plain")
+        with col2:
+            srt_content = generate_srt(result["segments"])
+            st.download_button("⬇️ Download SRT", srt_content, "transcript.srt", "text/plain")
+else:
+    st.info("👆 Upload an audio file above to begin.")
