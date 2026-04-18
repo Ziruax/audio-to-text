@@ -145,7 +145,7 @@ if uploaded_file:
                 os.unlink(tmp_path)
 
 # Sidebar
-st.sidebar.markdown("""
+st.sidebar.markdown(""
 ### 🎯 Features
 - Word‑level timestamps (20ms precision)
 - Automatic chunking for long audio (>30 sec)
