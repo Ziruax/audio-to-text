@@ -1,137 +1,103 @@
 import streamlit as st
 import torch
-import numpy as np
-from transformers import pipeline
 import tempfile
 import os
-from datetime import timedelta
-import librosa
+import pandas as pd
+from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq, pipeline
 
+# Page config
 st.set_page_config(page_title="Whisper Tiny Transcriber", layout="wide")
-st.title("Audio Transcription with Timestamps (Whisper Tiny)")
-st.markdown("Upload an audio file and get a timestamped transcription with word-level precision.")
+st.title("🎙️ Audio to Transcription with Timestamps")
+st.caption("Powered by OpenAI Whisper Tiny via 🤗 Transformers")
 
-SAMPLE_RATE = 16000
-
+# ------------------------------------------------------------------
+# 1. Model Loading & Caching
+# ------------------------------------------------------------------
 @st.cache_resource
-def load_pipeline():
-    device = 0 if torch.cuda.is_available() else -1
-    return pipeline(
-        "automatic-speech-recognition",
-        model="openai/whisper-tiny",
-        device=device,
-        chunk_length_s=30,
-        stride_length_s=(4, 2),
-        return_timestamps="word",
-    )
+def load_whisper_model():
+    """Loads model weights once and caches them in memory."""
+    processor = AutoProcessor.from_pretrained("openai/whisper-tiny")
+    model = AutoModelForSpeechSeq2Seq.from_pretrained("openai/whisper-tiny")
+    return processor, model
 
-pipe = load_pipeline()
+with st.spinner("⏳ Loading Whisper Tiny model (this runs only once)..."):
+    processor, model = load_whisper_model()
 
-def format_timestamp(seconds):
-    td = timedelta(seconds=seconds)
-    hours = td.seconds // 3600
-    minutes = (td.seconds % 3600) // 60
-    secs = td.seconds % 60
-    millis = int(td.microseconds / 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+# Auto-detect device and optimal dtype
+device = "cuda" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if device == "cuda" else torch.float32
+model = model.to(device, dtype=torch_dtype)
 
-def output_to_segments(result):
-    segments = []
-    if "chunks" in result:
-        for chunk in result["chunks"]:
-            start, end = chunk["timestamp"]
-            segments.append({
-                "start": start,
-                "end": end,
-                "text": chunk["text"].strip()
-            })
-    else:
-        segments.append({
-            "start": 0.0,
-            "end": 0.0,
-            "text": result.get("text", "").strip()
-        })
-    return segments
+# Create ASR pipeline for seamless timestamp handling
+asr_pipe = pipeline(
+    "automatic-speech-recognition",
+    model=model,
+    tokenizer=processor,
+    torch_dtype=torch_dtype,
+    device=device
+)
 
-def segments_to_srt(segments):
-    srt = []
-    for i, seg in enumerate(segments, 1):
-        start = format_timestamp(seg["start"])
-        end = format_timestamp(seg["end"])
-        text = seg["text"]
-        srt.append(f"{i}\n{start} --> {end}\n{text}\n")
-    return "\n".join(srt)
+# ------------------------------------------------------------------
+# 2. Helper Functions
+# ------------------------------------------------------------------
+def format_seconds(sec: float) -> str:
+    """Convert seconds to HH:MM:SS format."""
+    if sec is None:
+        return "--:--:--"
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    return f"{int(h):02d}:{int(m):02d}:{s:05.2f}"
 
-def segments_to_text(segments):
-    lines = []
-    for seg in segments:
-        start = format_timestamp(seg["start"])
-        end = format_timestamp(seg["end"])
-        lines.append(f"[{start} --> {end}] {seg['text']}")
-    return "\n".join(lines)
+# ------------------------------------------------------------------
+# 3. Streamlit UI
+# ------------------------------------------------------------------
+uploaded_file = st.file_uploader(
+    "📂 Upload an audio file",
+    type=["mp3", "wav", "m4a", "ogg", "flac"],
+    help="Supported formats: MP3, WAV, M4A, OGG, FLAC"
+)
 
-uploaded_file = st.file_uploader("Choose an audio file", type=["mp3", "wav", "m4a", "flac", "ogg"])
+if uploaded_file is not None:
+    st.audio(uploaded_file, format="audio/wav")
 
-if uploaded_file:
-    suffix = os.path.splitext(uploaded_file.name)[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.read())
-        tmp_path = tmp.name
+    if st.button("🚀 Transcribe with Timestamps", type="primary"):
+        # Save uploaded bytes to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+            tmp.write(uploaded_file.getbuffer())
+            tmp_path = tmp.name
 
-    st.audio(uploaded_file)
+        try:
+            with st.spinner("🔊 Processing audio... This may take a moment on CPU."):
+                # Run inference with timestamps
+                result = asr_pipe(tmp_path, return_timestamps=True)
 
-    if st.button("Transcribe with Timestamps"):
-        with st.spinner("Transcribing..."):
-            try:
-                audio, sr = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True)
-                result = pipe(audio)
-                segments = output_to_segments(result)
+            st.success("✅ Transcription Complete!")
 
-                if segments:
-                    st.success("Transcription complete!")
+            # Display full transcript
+            st.subheader("📝 Full Transcript")
+            st.text_area("", result["text"], height=150, label_visibility="collapsed")
 
-                    with st.expander("Timestamped Transcription", expanded=True):
-                        st.text(segments_to_text(segments))
+            # Display timestamped chunks
+            if "chunks" in result and result["chunks"]:
+                st.subheader("⏱️ Timestamped Segments")
+                
+                chunks = []
+                for chunk in result["chunks"]:
+                    start, end = chunk.get("timestamp", (None, None))
+                    chunks.append({
+                        "Start": format_seconds(start),
+                        "End": format_seconds(end),
+                        "Text": chunk["text"].strip()
+                    })
+                
+                df = pd.DataFrame(chunks)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                st.info("⚠️ No timestamp chunks returned. This can happen with very short audio clips.")
 
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        srt_data = segments_to_srt(segments)
-                        st.download_button(
-                            "Download SRT",
-                            data=srt_data,
-                            file_name="transcription.srt",
-                            mime="text/plain"
-                        )
-                    with col2:
-                        txt_data = segments_to_text(segments)
-                        st.download_button(
-                            "Download TXT (with timestamps)",
-                            data=txt_data,
-                            file_name="transcription.txt",
-                            mime="text/plain"
-                        )
-
-                    full_text = " ".join([seg["text"] for seg in segments])
-                    with st.expander("Plain Transcription (no timestamps)"):
-                        st.write(full_text)
-                else:
-                    st.error("No speech detected or transcription failed.")
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-            finally:
+        except Exception as e:
+            st.error(f"❌ Transcription failed: {str(e)}")
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
-
-st.sidebar.markdown(""
-### How to use
-1. Upload an audio file (MP3, WAV, M4A, etc.)
-2. Click **Transcribe with Timestamps**
-3. View the timestamped transcription
-4. Download as SRT (subtitles) or plain text
-
-### Model Info
-- Model: OpenAI Whisper Tiny (39M parameters)
-- Library: Hugging Face Transformers
-- Timestamps: Word-level, 20ms precision
-
-### Deployment on Streamlit Cloud
-Add this `requirements.txt`:
