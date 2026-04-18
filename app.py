@@ -1,8 +1,9 @@
 import streamlit as st
 import torch
-import tempfile
-import os
+import numpy as np
 import pandas as pd
+import soundfile as sf
+import io
 from transformers import pipeline
 
 st.set_page_config(page_title="Whisper Tiny Transcriber", layout="wide")
@@ -20,7 +21,7 @@ def load_asr_pipeline():
     return pipeline(
         "automatic-speech-recognition",
         model="openai/whisper-tiny",
-        processor="openai/whisper-tiny",  # Explicit processor prevents v5+ auto-guess errors
+        processor="openai/whisper-tiny",
         torch_dtype=torch_dtype,
         device=device
     )
@@ -56,15 +57,18 @@ if uploaded_file is not None:
     st.audio(uploaded_file, format="audio/wav")
 
     if st.button("🚀 Transcribe with Timestamps", type="primary"):
-        # Write to temp file so pipeline can read it with ffmpeg
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-            tmp.write(uploaded_file.getbuffer())
-            tmp_path = tmp.name
-
         try:
             with st.spinner("🔊 Processing audio..."):
-                # return_timestamps=True enables chunk-level timestamps
-                result = asr_pipe(tmp_path, return_timestamps=True)
+                # 🔑 BYPASS FFMPEG: Load audio directly into memory as a NumPy array
+                audio_bytes = uploaded_file.read()
+                audio_data, sampling_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+                
+                # Whisper expects 1-channel audio. Convert stereo to mono if needed
+                if audio_data.ndim > 1:
+                    audio_data = audio_data.mean(axis=1)
+                
+                # Pass (array, sampling_rate) directly to pipeline
+                result = asr_pipe(audio_data, sampling_rate=sampling_rate, return_timestamps=True)
 
             st.success("✅ Transcription Complete!")
 
@@ -89,6 +93,3 @@ if uploaded_file is not None:
         except Exception as e:
             st.error(f"❌ Transcription failed: {str(e)}")
             st.exception(e)
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
