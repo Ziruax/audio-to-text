@@ -11,31 +11,32 @@ st.title("🎙️ Audio to Transcription with Timestamps")
 st.caption("Powered by OpenAI Whisper Tiny via 🤗 Transformers")
 
 # ------------------------------------------------------------------
-# 1. Model Loading & Caching
+# 1. Model & Pipeline Loading (Cached)
 # ------------------------------------------------------------------
 @st.cache_resource
-def load_whisper_model():
-    """Loads model weights once and caches them in memory."""
+def load_asr_pipeline():
+    """Loads model, processor, and creates ASR pipeline. Runs only once."""
     processor = AutoProcessor.from_pretrained("openai/whisper-tiny")
     model = AutoModelForSpeechSeq2Seq.from_pretrained("openai/whisper-tiny")
-    return processor, model
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16 if device == "cuda" else torch.float32
+    
+    # Prepare model first
+    model = model.to(device, dtype=torch_dtype)
+    
+    # Create pipeline (use `processor=`, NOT `tokenizer=`)
+    asr_pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model,
+        processor=processor,
+        chunk_length_s=30,      # Process in 30s chunks for better memory & timestamps
+        stride_length_s=5       # 5s overlap to avoid cutting words
+    )
+    return asr_pipe
 
-with st.spinner("⏳ Loading Whisper Tiny model (this runs only once)..."):
-    processor, model = load_whisper_model()
-
-# Auto-detect device and optimal dtype
-device = "cuda" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if device == "cuda" else torch.float32
-model = model.to(device, dtype=torch_dtype)
-
-# Create ASR pipeline for seamless timestamp handling
-asr_pipe = pipeline(
-    "automatic-speech-recognition",
-    model=model,
-    tokenizer=processor,
-    torch_dtype=torch_dtype,
-    device=device
-)
+with st.spinner("⏳ Loading Whisper Tiny model (first load takes ~15s)..."):
+    asr_pipe = load_asr_pipeline()
 
 # ------------------------------------------------------------------
 # 2. Helper Functions
@@ -61,26 +62,25 @@ if uploaded_file is not None:
     st.audio(uploaded_file, format="audio/wav")
 
     if st.button("🚀 Transcribe with Timestamps", type="primary"):
-        # Save uploaded bytes to a temporary file
+        # Save to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             tmp.write(uploaded_file.getbuffer())
             tmp_path = tmp.name
 
         try:
-            with st.spinner("🔊 Processing audio... This may take a moment on CPU."):
+            with st.spinner("🔊 Processing audio..."):
                 # Run inference with timestamps
                 result = asr_pipe(tmp_path, return_timestamps=True)
 
             st.success("✅ Transcription Complete!")
 
-            # Display full transcript
+            # Full transcript
             st.subheader("📝 Full Transcript")
-            st.text_area("", result["text"], height=150, label_visibility="collapsed")
+            st.text_area("", result["text"], height=120, label_visibility="collapsed")
 
-            # Display timestamped chunks
-            if "chunks" in result and result["chunks"]:
+            # Timestamped segments
+            if result.get("chunks"):
                 st.subheader("⏱️ Timestamped Segments")
-                
                 chunks = []
                 for chunk in result["chunks"]:
                     start, end = chunk.get("timestamp", (None, None))
@@ -89,15 +89,14 @@ if uploaded_file is not None:
                         "End": format_seconds(end),
                         "Text": chunk["text"].strip()
                     })
-                
                 df = pd.DataFrame(chunks)
                 st.dataframe(df, use_container_width=True, hide_index=True)
             else:
-                st.info("⚠️ No timestamp chunks returned. This can happen with very short audio clips.")
+                st.info("⚠️ No timestamp chunks returned. This may happen with very short or silent audio.")
 
         except Exception as e:
             st.error(f"❌ Transcription failed: {str(e)}")
+            st.exception(e)  # Shows full traceback for debugging
         finally:
-            # Clean up temporary file
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
