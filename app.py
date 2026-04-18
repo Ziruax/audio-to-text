@@ -1,7 +1,6 @@
 import streamlit as st
 import torch
 import librosa
-import soundfile as sf
 import numpy as np
 from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
 import tempfile
@@ -16,53 +15,45 @@ st.markdown("Upload an audio file (MP3, WAV, M4A) and get a timestamped transcri
 # Constants
 SAMPLE_RATE = 16000  # Whisper expects 16 kHz
 
-# Cache the model and processor (only loaded once)
+# Cache the model and processor
 @st.cache_resource
 def load_model():
     with st.spinner("Loading Whisper Tiny model... (this may take a minute on first run)"):
         processor = AutoProcessor.from_pretrained("openai/whisper-tiny")
         model = AutoModelForSpeechSeq2Seq.from_pretrained("openai/whisper-tiny")
-        # Move to GPU if available
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
         return processor, model, device
 
 processor, model, device = load_model()
 
-# Audio loading and preprocessing
 def load_audio(file_path):
     """Load audio file, resample to 16kHz mono, return waveform array."""
     audio, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
     return audio
 
-# Transcription function with timestamps
 def transcribe_with_timestamps(audio_array):
     """Run Whisper model and return segments with timestamps."""
-    # Prepare inputs
     inputs = processor(audio_array, sampling_rate=SAMPLE_RATE, return_tensors="pt")
     input_features = inputs.input_features.to(device)
 
-    # Generate with timestamps enabled
     with torch.no_grad():
         generated_ids = model.generate(
             input_features,
-            return_timestamps=True,          # Enable word-level timestamps
-            language="en",                    # Set to English for better results (optional)
+            return_timestamps=True,
+            language="en",          # Force English for best results
             task="transcribe"
         )
 
-    # Decode output
-    transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    # The generated_ids contain timestamp tokens; we need to extract structured segments
-    # Using processor.tokenizer.decode with output offsets
+    # Decode with timestamps - FIX: add return_language=False
     segments = processor.tokenizer._decode_asr(
         generated_ids[0],
         return_timestamps=True,
-        time_precision=0.02,  # 20ms precision
+        return_language=False,      # Required to avoid missing argument error
+        time_precision=0.02,
     )
     return segments
 
-# Format timestamps to SRT or readable text
 def format_timestamp(seconds):
     """Convert seconds to SRT timestamp format: HH:MM:SS,mmm"""
     td = timedelta(seconds=seconds)
@@ -96,31 +87,26 @@ def segments_to_text(segments):
 uploaded_file = st.file_uploader("Choose an audio file", type=["mp3", "wav", "m4a", "flac", "ogg"])
 
 if uploaded_file is not None:
-    # Save uploaded file to a temporary location
+    # Save to temporary file
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
         tmp_file.write(uploaded_file.read())
         tmp_path = tmp_file.name
 
-    # Display audio player
+    # Audio player preview
     st.audio(uploaded_file, format='audio/wav')
 
     if st.button("Transcribe with Timestamps"):
         with st.spinner("Processing audio..."):
             try:
-                # Load and preprocess audio
                 audio_data = load_audio(tmp_path)
-
-                # Transcribe
                 segments = transcribe_with_timestamps(audio_data)
 
                 if segments:
                     st.success("Transcription complete!")
 
-                    # Display segments in an expander
                     with st.expander("📝 View Transcription with Timestamps", expanded=True):
                         st.text(segments_to_text(segments))
 
-                    # Provide download options
                     col1, col2 = st.columns(2)
                     with col1:
                         srt_data = segments_to_srt(segments)
@@ -139,7 +125,7 @@ if uploaded_file is not None:
                             mime="text/plain"
                         )
 
-                    # Optionally show full plain transcription without timestamps
+                    # Plain transcription without timestamps
                     full_text = " ".join([seg["text"].strip() for seg in segments])
                     with st.expander("📄 Plain Transcription (no timestamps)"):
                         st.write(full_text)
@@ -149,10 +135,9 @@ if uploaded_file is not None:
             except Exception as e:
                 st.error(f"An error occurred: {str(e)}")
             finally:
-                # Clean up temp file
                 os.unlink(tmp_path)
 
-# Instructions for deployment
+# Sidebar info
 st.sidebar.markdown("""
 ### How to use
 1. Upload an audio file (MP3, WAV, M4A, etc.)
