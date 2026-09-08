@@ -3,36 +3,55 @@ import whisper
 import tempfile
 import os
 import pandas as pd
-import time
-
-st.set_page_config(page_title="Audio Transcriber", layout="centered", page_icon="🎙️")
-
-st.title("🎙️ Audio to Text")
-st.caption("Upload an audio file to automatically generate a timestamped transcript.")
 
 # ------------------------------------------------------------------
-# 1. Initialize Session State
+# 1. Page Configuration
 # ------------------------------------------------------------------
-if "result" not in st.session_state:
-    st.session_state.result = None
-if "done" not in st.session_state:
-    st.session_state.done = False
-if "current_file" not in st.session_state:
-    st.session_state.current_file = None
+st.set_page_config(
+    page_title="Whisper Audio Transcriber",
+    page_icon="🎙️",
+    layout="wide"
+)
+
+st.title("🎙️ Audio to Text Transcriber")
+st.caption("Powered by OpenAI Whisper. Upload an audio file to generate transcripts and subtitles.")
 
 # ------------------------------------------------------------------
-# 2. Load Model (Cached)
+# 2. Sidebar Settings
 # ------------------------------------------------------------------
-@st.cache_resource
-def load_model():
-    # Using 'tiny' for speed on free tier. Change to 'base' or 'small' if needed.
-    return whisper.load_model("tiny")
-
-with st.spinner("Loading model..."):
-    model = load_model()
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    
+    # Restrict to tiny and base to stay safely within Streamlit Cloud's 1GB RAM limit
+    model_size = st.selectbox(
+        "Whisper Model Size",
+        options=["tiny", "base"],
+        index=0,
+        help="'tiny' is the fastest and uses the least memory. 'base' is slightly more accurate."
+    )
+    
+    task = st.radio(
+        "Task",
+        options=["Transcribe", "Translate to English"],
+        index=0,
+        help="'Translate' converts non-English audio directly into English text."
+    )
+    
+    st.markdown("---")
+    st.markdown("💡 **Tip:** Free Streamlit Cloud instances have 1GB RAM. Larger models (`small`, `medium`) will cause out-of-memory crashes.")
 
 # ------------------------------------------------------------------
-# 3. Helpers
+# 3. Model Loader (Cached)
+# ------------------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def get_whisper_model(size: str):
+    return whisper.load_model(size)
+
+with st.spinner(f"Loading Whisper '{model_size}' model..."):
+    model = get_whisper_model(model_size)
+
+# ------------------------------------------------------------------
+# 4. Helpers for Time Formatting
 # ------------------------------------------------------------------
 def fmt_time(sec: float) -> str:
     m, s = divmod(sec, 60)
@@ -45,96 +64,116 @@ def fmt_srt(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 # ------------------------------------------------------------------
-# 4. File Upload & Auto-Transcribe
+# 5. File Upload & Processing
 # ------------------------------------------------------------------
-uploaded_file = st.file_uploader("Choose audio file", type=["mp3", "wav", "m4a", "ogg", "flac"])
+uploaded_file = st.file_uploader(
+    "Choose an audio file", 
+    type=["mp3", "wav", "m4a", "ogg", "flac"]
+)
 
 if uploaded_file is not None:
-    # Detect new file to trigger transcription automatically
-    if st.session_state.current_file != uploaded_file.name:
-        st.session_state.current_file = uploaded_file.name
-        st.session_state.result = None
-        st.session_state.done = False
+    st.audio(uploaded_file, format=uploaded_file.type)
 
-    # Run transcription automatically on new upload
-    if st.session_state.get("result") is None and not st.session_state.get("done"):
-        st.session_state.done = True
+    start_transcription = st.button("🚀 Transcribe Audio", type="primary", use_container_width=True)
+
+    if start_transcription:
         tmp_path = None
         try:
-            with st.status("Transcribing audio...", expanded=True) as status:
-                status.write("💾 Saving temporary file...")
-                
-                # Save uploaded file to temp location
-                # Whisper can handle raw bytes directly in newer versions, 
-                # but saving to disk ensures compatibility with all formats on Streamlit Cloud
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
+            with st.status("Processing audio...", expanded=True) as status:
+                status.write("💾 Storing temporary audio file...")
+                suffix = os.path.splitext(uploaded_file.name)[1]
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                     tmp.write(uploaded_file.getbuffer())
                     tmp_path = tmp.name
 
-                status.write("🤖 Running Whisper inference...")
+                status.write(f"🤖 Running Whisper inference ({task.lower()})...")
+                task_action = "translate" if task == "Translate to English" else "transcribe"
                 
-                # Whisper handles decoding internally using its own bundled logic
-                # It does NOT call system ffmpeg if the file format is standard
-                res = model.transcribe(tmp_path, verbose=False)
+                result = model.transcribe(
+                    tmp_path, 
+                    task=task_action, 
+                    verbose=False,
+                    fp16=False # Ensures CPU stability on Streamlit Cloud
+                )
                 
-                status.update(label="✅ Transcription Complete!", state="complete")
-                time.sleep(0.3)
-                st.session_state.result = res
-                
+                status.update(label="✅ Completed successfully!", state="complete", expanded=False)
+                st.session_state["result"] = result
+                st.session_state["file_name"] = uploaded_file.name
+
         except Exception as e:
-            st.error(f"❌ Transcription failed: {str(e)}")
-            st.session_state.done = False
+            st.error(f"❌ Processing failed: {e}")
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-    # ------------------------------------------------------------------
-    # 5. Display Results
-    # ------------------------------------------------------------------
-    if st.session_state.get("result"):
-        res = st.session_state.result
-        st.success("✅ Transcription finished.")
+# ------------------------------------------------------------------
+# 6. Display Results
+# ------------------------------------------------------------------
+if "result" in st.session_state and st.session_state["result"] is not None:
+    res = st.session_state["result"]
+    base_filename = os.path.splitext(st.session_state.get("file_name", "audio"))[0]
 
-        # Prepare formats
-        txt_lines = []
-        srt_lines = []
-        table_rows = []
+    # Quick metrics
+    col_lang, col_dur = st.columns(2)
+    detected_lang = res.get("language", "Unknown").upper()
+    col_lang.metric("Detected Language", detected_lang)
+    
+    segments = res.get("segments", [])
+    total_time = segments[-1]["end"] if segments else 0
+    col_dur.metric("Audio Duration", fmt_time(total_time))
 
-        for seg in res["segments"]:
-            t_start = fmt_time(seg["start"])
-            t_end = fmt_time(seg["end"])
-            text = seg["text"].strip()
+    # Parse segments
+    clean_text = res.get("text", "").strip()
+    table_rows = []
+    timestamped_lines = []
+    srt_blocks = []
 
-            table_rows.append({"Start": t_start, "End": t_end, "Text": text})
-            txt_lines.append(f"[{t_start} -> {t_end}] {text}")
-            srt_lines.append(f"{len(txt_lines)}\n{fmt_srt(seg['start'])} --> {fmt_srt(seg['end'])}\n{text}\n")
+    for i, seg in enumerate(segments, 1):
+        t_start = fmt_time(seg["start"])
+        t_end = fmt_time(seg["end"])
+        text = seg["text"].strip()
 
-        # DOWNLOAD BUTTONS AT TOP
-        st.subheader("📥 Download Files")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                label="Download Timestamped TXT",
-                data="\n".join(txt_lines),
-                file_name="transcript.txt",
-                mime="text/plain"
-            )
-        with col2:
-            st.download_button(
-                label="Download SRT Subtitles",
-                data="\n".join(srt_lines),
-                file_name="transcript.srt",
-                mime="text/plain"
-            )
+        table_rows.append({"Start": t_start, "End": t_end, "Segment Text": text})
+        timestamped_lines.append(f"[{t_start} -> {t_end}] {text}")
+        srt_blocks.append(f"{i}\n{fmt_srt(seg['start'])} --> {fmt_srt(seg['end'])}\n{text}\n")
 
-        st.divider()
+    timestamped_text = "\n".join(timestamped_lines)
+    srt_content = "\n".join(srt_blocks)
 
-        # TABLE VIEW
-        st.subheader("Timestamped Segments")
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True, height=300)
+    st.markdown("---")
 
-        # FULL TEXT VIEW
-        st.subheader("Full Transcript")
-        st.text_area("", "\n".join(txt_lines), height=250, label_visibility="collapsed")
-else:
-    st.info("👆 Upload an audio file above to begin.")
+    # Download Bar
+    d_col1, d_col2, d_col3 = st.columns(3)
+    d_col1.download_button(
+        "📄 Download Plain Text",
+        data=clean_text,
+        file_name=f"{base_filename}_transcript.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
+    d_col2.download_button(
+        "⏱️ Download Timestamped TXT",
+        data=timestamped_text,
+        file_name=f"{base_filename}_timestamped.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
+    d_col3.download_button(
+        "🎬 Download Subtitles (.SRT)",
+        data=srt_content,
+        file_name=f"{base_filename}.srt",
+        mime="text/plain",
+        use_container_width=True
+    )
+
+    # Organized Output Tabs
+    tab1, tab2, tab3 = st.tabs(["📝 Full Transcript", "⏱️ Timestamp Segments", "🎬 SRT Output"])
+
+    with tab1:
+        st.text_area("Full Transcript", clean_text, height=350, label_visibility="collapsed")
+
+    with tab2:
+        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+    with tab3:
+        st.code(srt_content, language="markdown")
