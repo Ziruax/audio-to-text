@@ -4,19 +4,6 @@ import tempfile
 import os
 import pandas as pd
 import time
-import subprocess
-
-# Install ffmpeg if not available
-try:
-    subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-except (subprocess.CalledProcessError, FileNotFoundError):
-    with st.spinner("Installing ffmpeg..."):
-        # Try to install ffmpeg without updating repositories to avoid expired repo errors
-        result = subprocess.run(["apt-get", "install", "-y", "ffmpeg"], capture_output=True, text=True)
-        if result.returncode != 0:
-            # If that fails, try with update but ignore errors
-            subprocess.run(["apt-get", "update", "--allow-releaseinfo-change"], capture_output=True)
-            subprocess.run(["apt-get", "install", "-y", "ffmpeg"], capture_output=True)
 
 st.set_page_config(page_title="Audio Transcriber", layout="centered", page_icon="🎙️")
 
@@ -24,7 +11,7 @@ st.title("🎙️ Audio to Text")
 st.caption("Upload an audio file to automatically generate a timestamped transcript.")
 
 # ------------------------------------------------------------------
-# 1. Initialize Session State (REQUIRED - prevents KeyError)
+# 1. Initialize Session State
 # ------------------------------------------------------------------
 if "result" not in st.session_state:
     st.session_state.result = None
@@ -38,6 +25,7 @@ if "current_file" not in st.session_state:
 # ------------------------------------------------------------------
 @st.cache_resource
 def load_model():
+    # Using 'tiny' for speed on free tier. Change to 'base' or 'small' if needed.
     return whisper.load_model("tiny")
 
 with st.spinner("Loading model..."):
@@ -69,23 +57,30 @@ if uploaded_file is not None:
         st.session_state.done = False
 
     # Run transcription automatically on new upload
-    # ✅ FIX: Use .get() to safely check session state keys
     if st.session_state.get("result") is None and not st.session_state.get("done"):
         st.session_state.done = True
         tmp_path = None
         try:
             with st.status("Transcribing audio...", expanded=True) as status:
                 status.write("💾 Saving temporary file...")
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                
+                # Save uploaded file to temp location
+                # Whisper can handle raw bytes directly in newer versions, 
+                # but saving to disk ensures compatibility with all formats on Streamlit Cloud
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
                     tmp.write(uploaded_file.getbuffer())
                     tmp_path = tmp.name
 
                 status.write("🤖 Running Whisper inference...")
+                
+                # Whisper handles decoding internally using its own bundled logic
+                # It does NOT call system ffmpeg if the file format is standard
                 res = model.transcribe(tmp_path, verbose=False)
                 
                 status.update(label="✅ Transcription Complete!", state="complete")
                 time.sleep(0.3)
                 st.session_state.result = res
+                
         except Exception as e:
             st.error(f"❌ Transcription failed: {str(e)}")
             st.session_state.done = False
