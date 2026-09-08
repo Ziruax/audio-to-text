@@ -1,3 +1,4 @@
 streamlit
 openai-whisper
 pandas
+imageio-ffmpeg
