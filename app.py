@@ -4,6 +4,19 @@ import tempfile
 import os
 import pandas as pd
 import time
+import subprocess
+
+# Install ffmpeg if not available
+try:
+    subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+except (subprocess.CalledProcessError, FileNotFoundError):
+    with st.spinner("Installing ffmpeg..."):
+        # Try to install ffmpeg without updating repositories to avoid expired repo errors
+        result = subprocess.run(["apt-get", "install", "-y", "ffmpeg"], capture_output=True, text=True)
+        if result.returncode != 0:
+            # If that fails, try with update but ignore errors
+            subprocess.run(["apt-get", "update", "--allow-releaseinfo-change"], capture_output=True)
+            subprocess.run(["apt-get", "install", "-y", "ffmpeg"], capture_output=True)
 
 st.set_page_config(page_title="Audio Transcriber", layout="centered", page_icon="🎙️")
 
