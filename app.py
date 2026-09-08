@@ -1,27 +1,36 @@
 import os
 import shutil
+from pathlib import Path
 
 # ------------------------------------------------------------------
-# 0. Patch FFmpeg path before Whisper loads
+# 0. Setup FFmpeg in a User-Writable Directory
 # ------------------------------------------------------------------
-# Streamlit Cloud's Debian repository mirrors can fail on apt-get.
-# This extracts the static binary from imageio-ffmpeg and injects it into PATH.
 try:
     import imageio_ffmpeg
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    ffmpeg_dir = os.path.dirname(ffmpeg_exe)
 
-    if ffmpeg_dir not in os.environ["PATH"]:
-        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ["PATH"]
+    # Create a local user-writable bin folder (~/.local/bin)
+    user_bin = Path.home() / ".local" / "bin"
+    user_bin.mkdir(parents=True, exist_ok=True)
 
-    target_ffmpeg = os.path.join(ffmpeg_dir, "ffmpeg")
-    if not os.path.exists(target_ffmpeg) and os.path.exists(ffmpeg_exe):
+    target_ffmpeg = user_bin / "ffmpeg"
+
+    # Link or copy binary to ~/.local/bin/ffmpeg
+    if not target_ffmpeg.exists():
         try:
-            os.symlink(ffmpeg_exe, target_ffmpeg)
+            target_ffmpeg.symlink_to(ffmpeg_exe)
         except OSError:
             shutil.copyfile(ffmpeg_exe, target_ffmpeg)
-except ImportError:
-    pass
+            target_ffmpeg.chmod(0o755)
+
+    # Prepend the directory to PATH
+    user_bin_str = str(user_bin)
+    if user_bin_str not in os.environ["PATH"]:
+        os.environ["PATH"] = user_bin_str + os.pathsep + os.environ["PATH"]
+
+except Exception as e:
+    # Print to logs if path resolution fails
+    print(f"FFmpeg setup warning: {e}")
 
 import streamlit as st
 import whisper
@@ -46,12 +55,11 @@ st.caption("Powered by OpenAI Whisper. Upload an audio file to generate transcri
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # 'tiny' and 'base' fit safely within Streamlit Cloud's 1GB RAM quota
     model_size = st.selectbox(
         "Whisper Model Size",
         options=["tiny", "base"],
         index=0,
-        help="'tiny' is the fastest. 'base' offers slightly higher accuracy."
+        help="'tiny' is fastest; 'base' provides slightly better accuracy."
     )
     
     task = st.radio(
@@ -62,7 +70,7 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.caption("💡 Free tier cloud nodes run on shared CPU with 1GB RAM. Larger models risk out-of-memory crashes.")
+    st.caption("💡 Free tier Streamlit Cloud nodes run on 1GB RAM. Larger models risk out-of-memory crashes.")
 
 # ------------------------------------------------------------------
 # 3. Model Loader (Cached)
@@ -117,7 +125,7 @@ if uploaded_file is not None:
                     tmp_path, 
                     task=task_action, 
                     verbose=False,
-                    fp16=False  # Avoids CPU warnings on non-GPU containers
+                    fp16=False
                 )
                 
                 status.update(label="✅ Completed successfully!", state="complete", expanded=False)
