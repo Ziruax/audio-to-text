@@ -1,7 +1,31 @@
+import os
+import shutil
+
+# ------------------------------------------------------------------
+# 0. Patch FFmpeg path before Whisper loads
+# ------------------------------------------------------------------
+# Streamlit Cloud's Debian repository mirrors can fail on apt-get.
+# This extracts the static binary from imageio-ffmpeg and injects it into PATH.
+try:
+    import imageio_ffmpeg
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+
+    if ffmpeg_dir not in os.environ["PATH"]:
+        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ["PATH"]
+
+    target_ffmpeg = os.path.join(ffmpeg_dir, "ffmpeg")
+    if not os.path.exists(target_ffmpeg) and os.path.exists(ffmpeg_exe):
+        try:
+            os.symlink(ffmpeg_exe, target_ffmpeg)
+        except OSError:
+            shutil.copyfile(ffmpeg_exe, target_ffmpeg)
+except ImportError:
+    pass
+
 import streamlit as st
 import whisper
 import tempfile
-import os
 import pandas as pd
 
 # ------------------------------------------------------------------
@@ -22,23 +46,23 @@ st.caption("Powered by OpenAI Whisper. Upload an audio file to generate transcri
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # Restrict to tiny and base to stay safely within Streamlit Cloud's 1GB RAM limit
+    # 'tiny' and 'base' fit safely within Streamlit Cloud's 1GB RAM quota
     model_size = st.selectbox(
         "Whisper Model Size",
         options=["tiny", "base"],
         index=0,
-        help="'tiny' is the fastest and uses the least memory. 'base' is slightly more accurate."
+        help="'tiny' is the fastest. 'base' offers slightly higher accuracy."
     )
     
     task = st.radio(
         "Task",
         options=["Transcribe", "Translate to English"],
         index=0,
-        help="'Translate' converts non-English audio directly into English text."
+        help="'Translate' converts foreign-language audio directly to English text."
     )
     
     st.markdown("---")
-    st.markdown("💡 **Tip:** Free Streamlit Cloud instances have 1GB RAM. Larger models (`small`, `medium`) will cause out-of-memory crashes.")
+    st.caption("💡 Free tier cloud nodes run on shared CPU with 1GB RAM. Larger models risk out-of-memory crashes.")
 
 # ------------------------------------------------------------------
 # 3. Model Loader (Cached)
@@ -80,7 +104,7 @@ if uploaded_file is not None:
         tmp_path = None
         try:
             with st.status("Processing audio...", expanded=True) as status:
-                status.write("💾 Storing temporary audio file...")
+                status.write("💾 Writing temporary audio file...")
                 suffix = os.path.splitext(uploaded_file.name)[1]
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                     tmp.write(uploaded_file.getbuffer())
@@ -93,7 +117,7 @@ if uploaded_file is not None:
                     tmp_path, 
                     task=task_action, 
                     verbose=False,
-                    fp16=False # Ensures CPU stability on Streamlit Cloud
+                    fp16=False  # Avoids CPU warnings on non-GPU containers
                 )
                 
                 status.update(label="✅ Completed successfully!", state="complete", expanded=False)
@@ -113,7 +137,7 @@ if "result" in st.session_state and st.session_state["result"] is not None:
     res = st.session_state["result"]
     base_filename = os.path.splitext(st.session_state.get("file_name", "audio"))[0]
 
-    # Quick metrics
+    # Metrics
     col_lang, col_dur = st.columns(2)
     detected_lang = res.get("language", "Unknown").upper()
     col_lang.metric("Detected Language", detected_lang)
@@ -145,28 +169,28 @@ if "result" in st.session_state and st.session_state["result"] is not None:
     # Download Bar
     d_col1, d_col2, d_col3 = st.columns(3)
     d_col1.download_button(
-        "📄 Download Plain Text",
+        "📄 Plain Text (.txt)",
         data=clean_text,
         file_name=f"{base_filename}_transcript.txt",
         mime="text/plain",
         use_container_width=True
     )
     d_col2.download_button(
-        "⏱️ Download Timestamped TXT",
+        "⏱️ Timestamped (.txt)",
         data=timestamped_text,
         file_name=f"{base_filename}_timestamped.txt",
         mime="text/plain",
         use_container_width=True
     )
     d_col3.download_button(
-        "🎬 Download Subtitles (.SRT)",
+        "🎬 Subtitles (.srt)",
         data=srt_content,
         file_name=f"{base_filename}.srt",
         mime="text/plain",
         use_container_width=True
     )
 
-    # Organized Output Tabs
+    # Output Tabs
     tab1, tab2, tab3 = st.tabs(["📝 Full Transcript", "⏱️ Timestamp Segments", "🎬 SRT Output"])
 
     with tab1:
