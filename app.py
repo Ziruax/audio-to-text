@@ -69,6 +69,12 @@ with st.sidebar:
         help="'Translate' converts foreign-language audio directly to English text."
     )
     
+    enable_word_timestamps = st.checkbox(
+        "Enable Word-Level Timestamps",
+        value=True,
+        help="Extract exact timings for every single word. Required for word-by-word subtitles."
+    )
+    
     st.markdown("---")
     st.caption("💡 Free tier Streamlit Cloud nodes run on 1GB RAM. Larger models risk out-of-memory crashes.")
 
@@ -125,7 +131,8 @@ if uploaded_file is not None:
                     tmp_path, 
                     task=task_action, 
                     verbose=False,
-                    fp16=False
+                    fp16=False,
+                    word_timestamps=enable_word_timestamps
                 )
                 
                 status.update(label="✅ Completed successfully!", state="complete", expanded=False)
@@ -154,27 +161,56 @@ if "result" in st.session_state and st.session_state["result"] is not None:
     total_time = segments[-1]["end"] if segments else 0
     col_dur.metric("Audio Duration", fmt_time(total_time))
 
-    # Parse segments
+    # Parse segments and words
     clean_text = res.get("text", "").strip()
+    
+    # Segment-level data
     table_rows = []
     timestamped_lines = []
     srt_blocks = []
+    
+    # Word-level data
+    word_table_rows = []
+    word_srt_blocks = []
+    word_idx = 1
 
     for i, seg in enumerate(segments, 1):
         t_start = fmt_time(seg["start"])
         t_end = fmt_time(seg["end"])
         text = seg["text"].strip()
 
+        # Segment level parsing
         table_rows.append({"Start": t_start, "End": t_end, "Segment Text": text})
         timestamped_lines.append(f"[{t_start} -> {t_end}] {text}")
         srt_blocks.append(f"{i}\n{fmt_srt(seg['start'])} --> {fmt_srt(seg['end'])}\n{text}\n")
+        
+        # Word level parsing (if enabled)
+        if "words" in seg:
+            for w in seg["words"]:
+                w_start_fmt = fmt_time(w["start"])
+                w_end_fmt = fmt_time(w["end"])
+                w_text = w["word"].strip()
+                
+                word_table_rows.append({
+                    "Start": w_start_fmt, 
+                    "End": w_end_fmt, 
+                    "Word": w_text, 
+                    "Probability": f"{w.get('probability', 0):.2f}"
+                })
+                
+                word_srt_blocks.append(
+                    f"{word_idx}\n{fmt_srt(w['start'])} --> {fmt_srt(w['end'])}\n{w_text}\n"
+                )
+                word_idx += 1
 
     timestamped_text = "\n".join(timestamped_lines)
     srt_content = "\n".join(srt_blocks)
+    word_srt_content = "\n".join(word_srt_blocks)
 
     st.markdown("---")
+    st.subheader("📥 Download Options")
 
-    # Download Bar
+    # Download Buttons Layout
     d_col1, d_col2, d_col3 = st.columns(3)
     d_col1.download_button(
         "📄 Plain Text (.txt)",
@@ -184,28 +220,46 @@ if "result" in st.session_state and st.session_state["result"] is not None:
         use_container_width=True
     )
     d_col2.download_button(
-        "⏱️ Timestamped (.txt)",
-        data=timestamped_text,
-        file_name=f"{base_filename}_timestamped.txt",
-        mime="text/plain",
-        use_container_width=True
-    )
-    d_col3.download_button(
-        "🎬 Subtitles (.srt)",
+        "🎬 Standard Subtitles (.srt)",
         data=srt_content,
         file_name=f"{base_filename}.srt",
         mime="text/plain",
         use_container_width=True
     )
+    
+    if word_srt_blocks:
+        d_col3.download_button(
+            "🅰️ Word-by-Word Subtitles (.srt)",
+            data=word_srt_content,
+            file_name=f"{base_filename}_word_by_word.srt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    else:
+        d_col3.button("🅰️ Word-by-Word Subtitles (.srt)", disabled=True, help="Enable Word-Level Timestamps in sidebar to use this.")
+
+    st.markdown("---")
 
     # Output Tabs
-    tab1, tab2, tab3 = st.tabs(["📝 Full Transcript", "⏱️ Timestamp Segments", "🎬 SRT Output"])
+    tabs = st.tabs(["📝 Full Transcript", "⏱️ Segment Timestamps", "🎬 Segment SRT", "🔤 Word Timestamps", "🅰️ Word SRT"])
 
-    with tab1:
+    with tabs[0]:
         st.text_area("Full Transcript", clean_text, height=350, label_visibility="collapsed")
 
-    with tab2:
+    with tabs[1]:
         st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
-    with tab3:
+    with tabs[2]:
         st.code(srt_content, language="markdown")
+        
+    with tabs[3]:
+        if word_table_rows:
+            st.dataframe(pd.DataFrame(word_table_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("Word-level timestamps were not enabled for this transcription. Enable them in the sidebar and re-run.")
+            
+    with tabs[4]:
+        if word_srt_content:
+            st.code(word_srt_content, language="markdown")
+        else:
+            st.info("Word-level SRT is not available. Enable word timestamps in the sidebar and re-run.")
